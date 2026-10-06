@@ -260,6 +260,31 @@ io.on('connection', (socket) => {
       return;
     }
 
+    if (action === 'transferHost') {
+      if (room.host !== socket.id) {
+        return socket.emit('voiceRoomError', 'المالك الحالي فقط يستطيع نقل الملكية');
+      }
+      const nextHost = room.members.find(item => item.id === String(data.memberId || ''));
+      if (!nextHost) return;
+      room.members.forEach(item => { item.isHost = item.id === nextHost.id; });
+      room.host = nextHost.id;
+      emitVoiceRoomState(roomCode);
+      return;
+    }
+
+    if (action === 'changeRoomType') {
+      if (room.host !== socket.id) {
+        return socket.emit('voiceRoomError', 'المالك فقط يستطيع تغيير نوع الغرفة');
+      }
+      room.roomType = String(data.roomType || room.roomType);
+      io.to(roomCode).emit('voiceRoomRoomTypeChanged', {
+        roomType: room.roomType,
+        gameType: room.gameType
+      });
+      emitVoiceRoomState(roomCode);
+      return;
+    }
+
     if (action === 'sendMessage') {
       const message = String(data.message || '').trim().slice(0, 300);
       if (message) {
@@ -574,8 +599,9 @@ function removeVoiceMember(socket, roomCode) {
   }
 
   if (room.host === socket.id) {
-    room.host = room.members[0].id;
-    room.members[0].isHost = true;
+    const nextHost = room.members[Math.floor(Math.random() * room.members.length)];
+    room.host = nextHost.id;
+    room.members.forEach(member => { member.isHost = member.id === nextHost.id; });
   }
   io.to(roomCode).emit('voiceRoomMemberLeft', socket.id);
   emitVoiceRoomState(roomCode);
