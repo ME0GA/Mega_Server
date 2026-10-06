@@ -272,6 +272,9 @@ io.on('connection', (socket) => {
     }
 
     if (action === 'musicChanged') {
+      if (room.host !== socket.id) {
+        return socket.emit('voiceRoomError', 'المضيف فقط يستطيع التحكم في موسيقى الغرفة');
+      }
       room.music = {
         senderId: socket.id,
         track: data.track || null,
@@ -281,6 +284,30 @@ io.on('connection', (socket) => {
       };
       io.to(roomCode).emit('voiceRoomMusicChanged', room.music);
       emitVoiceRoomState(roomCode);
+      return;
+    }
+
+    if (action === 'requestMusicUpload') {
+      if (room.host === socket.id) return;
+      io.to(room.host).emit('voiceRoomMusicRequest', {
+        requesterId: socket.id,
+        requesterName: member.name
+      });
+      return;
+    }
+
+    if (action === 'musicRequestDecision') {
+      if (room.host !== socket.id) return;
+      const requesterId = String(data.requesterId || '');
+      if (requesterId) {
+        io.to(requesterId).emit('voiceRoomMusicDecision', {
+          approved: data.approved === true,
+          requesterId,
+          message: data.approved === true
+            ? 'تمت الموافقة على إضافة الموسيقى'
+            : 'رفض المضيف إضافة الموسيقى'
+        });
+      }
       return;
     }
 
