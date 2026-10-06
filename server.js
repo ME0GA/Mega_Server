@@ -68,6 +68,7 @@ function voiceRoomSnapshot(room) {
     roomCode: room.roomCode,
     roomName: room.roomName,
     roomType: room.roomType,
+    gameType: room.gameType,
     maxMembers: room.maxMembers,
     isPublic: room.isPublic,
     music: room.music || null,
@@ -195,8 +196,9 @@ io.on('connection', (socket) => {
       roomCode,
       roomName: String(data.roomName || 'Voice Room').trim().slice(0, 40),
       roomType: String(data.roomType || 'عادي'),
+      gameType: String(data.gameType || 'Quiz Game'),
       password: String(data.password || ''),
-      maxMembers: Math.min(Math.max(Number(data.maxMembers) || 20, 2), 100),
+      maxMembers: Math.min(Math.max(Number(data.maxMembers) || 2, 2), 10),
       isPublic: data.isPublic !== false,
       music: null,
       host: socket.id,
@@ -284,6 +286,44 @@ io.on('connection', (socket) => {
       };
       io.to(roomCode).emit('voiceRoomMusicChanged', room.music);
       emitVoiceRoomState(roomCode);
+      return;
+    }
+
+    if (action === 'launchGame') {
+      if (room.host !== socket.id) {
+        return socket.emit('voiceRoomError', 'المالك فقط يستطيع بدء اللعبة');
+      }
+      room.gameType = String(data.gameType || room.gameType || 'Quiz Game');
+      if (room.gameType === 'Quiz Game') {
+        rooms[roomCode] = {
+          host: room.host,
+          gameType: room.gameType,
+          maxPlayers: room.maxMembers,
+          allowChat: true,
+          allowMic: true,
+          isPublic: room.isPublic,
+          status: 'playing',
+          currentQuestionIndex: 0,
+          answersCount: 0,
+          questions: [...sampleQuestions],
+          players: room.members.map(member => ({
+            id: member.id,
+            playerId: member.playerId,
+            name: member.name,
+            isHost: member.isHost,
+            isReady: true,
+            score: 0,
+            hasAnswered: false
+          }))
+        };
+      }
+      io.to(roomCode).emit('voiceRoomGameStarted', {
+        roomCode,
+        gameType: room.gameType
+      });
+      if (room.gameType === 'Quiz Game') {
+        setTimeout(() => startQuestionTimer(roomCode), 1000);
+      }
       return;
     }
 
