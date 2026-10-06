@@ -1,9 +1,17 @@
 const express = require('express');
 const http = require('http');
 const { Server } = require('socket.io');
+const multer = require('multer');
 
 const app = express();
 const server = http.createServer(app);
+app.set('trust proxy', 1);
+
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 25 * 1024 * 1024 }
+});
+const musicFiles = new Map();
 
 // إعدادات CORS للسماح بالاتصال من Flutter Web
 const io = new Server(server, {
@@ -16,6 +24,32 @@ const io = new Server(server, {
 // مسار رئيسي للتأكد أن السيرفر شغال لما تفتحه في المتصفح
 app.get('/', (req, res) => {
   res.send('🚀 Mega Server is running perfectly!');
+});
+
+app.post('/api/room-music', upload.single('file'), (req, res) => {
+  if (!req.file) return res.status(400).json({ error: 'Audio file is required' });
+
+  const id = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  musicFiles.set(id, {
+    buffer: req.file.buffer,
+    contentType: req.file.mimetype || 'audio/mpeg',
+    name: req.file.originalname
+  });
+
+  const baseUrl = process.env.PUBLIC_SERVER_URL || `${req.protocol}://${req.get('host')}`;
+  res.json({
+    id,
+    name: req.file.originalname,
+    url: `${baseUrl}/room-music/${id}`
+  });
+});
+
+app.get('/room-music/:id', (req, res) => {
+  const music = musicFiles.get(req.params.id);
+  if (!music) return res.status(404).send('Music file not found');
+  res.set('Content-Type', music.contentType);
+  res.set('Accept-Ranges', 'bytes');
+  res.send(music.buffer);
 });
 
 const rooms = {};
@@ -36,6 +70,7 @@ function voiceRoomSnapshot(room) {
     roomType: room.roomType,
     maxMembers: room.maxMembers,
     isPublic: room.isPublic,
+    music: room.music || null,
     members: room.members
   };
 }
@@ -163,6 +198,7 @@ io.on('connection', (socket) => {
       password: String(data.password || ''),
       maxMembers: Math.min(Math.max(Number(data.maxMembers) || 20, 2), 100),
       isPublic: data.isPublic !== false,
+      music: null,
       host: socket.id,
       members: [{
         id: socket.id,
@@ -236,10 +272,15 @@ io.on('connection', (socket) => {
     }
 
     if (action === 'musicChanged') {
-      io.to(roomCode).emit('voiceRoomMusicChanged', {
+      room.music = {
         senderId: socket.id,
-        track: String(data.track || '')
-      });
+        track: data.track || null,
+        isPlaying: data.isPlaying === true,
+        positionMs: Number(data.positionMs) || 0,
+        sentAt: Date.now()
+      };
+      io.to(roomCode).emit('voiceRoomMusicChanged', room.music);
+      emitVoiceRoomState(roomCode);
       return;
     }
 
