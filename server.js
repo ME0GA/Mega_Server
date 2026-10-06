@@ -19,6 +19,34 @@ app.get('/', (req, res) => {
 });
 
 const rooms = {};
+const voiceRooms = {};
+
+function generateUniqueRoomCode() {
+  let roomCode = generateRoomCode();
+  while (rooms[roomCode] || voiceRooms[roomCode]) {
+    roomCode = generateRoomCode();
+  }
+  return roomCode;
+}
+
+function voiceRoomSnapshot(room) {
+  return {
+    roomCode: room.roomCode,
+    roomName: room.roomName,
+    roomType: room.roomType,
+    maxMembers: room.maxMembers,
+    isPublic: room.isPublic,
+    members: room.members
+  };
+}
+
+function emitVoiceRoomState(roomCode) {
+  const room = voiceRooms[roomCode];
+  if (room) {
+    io.to(roomCode).emit('voiceRoomState', voiceRoomSnapshot(room));
+  }
+}
+
 function generatePlayerId() {
   return Math.floor(10000000 + Math.random() * 90000000).toString();
 }
@@ -125,6 +153,110 @@ io.on('connection', (socket) => {
   const playerId = generatePlayerId();
   socket.playerId = playerId;
   socket.emit('your_player_id', { playerId: socket.playerId });
+
+  socket.on('createVoiceRoom', (data = {}) => {
+    const roomCode = generateUniqueRoomCode();
+    const room = {
+      roomCode,
+      roomName: String(data.roomName || 'Voice Room').trim().slice(0, 40),
+      roomType: String(data.roomType || 'عادي'),
+      password: String(data.password || ''),
+      maxMembers: Math.min(Math.max(Number(data.maxMembers) || 20, 2), 100),
+      isPublic: data.isPublic !== false,
+      host: socket.id,
+      members: [{
+        id: socket.id,
+        playerId: socket.playerId,
+        name: String(data.playerName || 'Guest').trim().slice(0, 30),
+        isHost: true,
+        isMuted: false,
+        isSpeaking: false
+      }]
+    };
+
+    voiceRooms[roomCode] = room;
+    socket.join(roomCode);
+    socket.voiceRoomCode = roomCode;
+    socket.emit('voiceRoomCreated', voiceRoomSnapshot(room));
+    emitVoiceRoomState(roomCode);
+    console.log(`🎙️ Voice room ${roomCode} created by ${room.members[0].name}`);
+  });
+
+  socket.on('joinVoiceRoom', (data = {}) => {
+    const roomCode = String(data.roomCode || '').trim();
+    const room = voiceRooms[roomCode];
+    if (!room) return socket.emit('voiceRoomError', 'الغرفة الصوتية غير موجودة');
+    if (room.password !== String(data.password || '')) {
+      return socket.emit('voiceRoomError', 'كلمة مرور الغرفة غير صحيحة');
+    }
+    if (room.members.length >= room.maxMembers) {
+      return socket.emit('voiceRoomError', 'الغرفة الصوتية مكتملة');
+    }
+
+    const member = {
+      id: socket.id,
+      playerId: socket.playerId,
+      name: String(data.playerName || 'Guest').trim().slice(0, 30),
+      isHost: false,
+      isMuted: false,
+      isSpeaking: false
+    };
+    room.members.push(member);
+    socket.join(roomCode);
+    socket.voiceRoomCode = roomCode;
+    socket.emit('voiceRoomJoined', voiceRoomSnapshot(room));
+    socket.to(roomCode).emit('voiceRoomMemberJoined', member);
+    emitVoiceRoomState(roomCode);
+  });
+
+  socket.on('voiceRoomAction', (data = {}) => {
+    const roomCode = String(data.roomCode || '').trim();
+    const room = voiceRooms[roomCode];
+    const member = room?.members.find(item => item.id === socket.id);
+    if (!room || !member) return socket.emit('voiceRoomError', 'لست داخل هذه الغرفة');
+
+    const action = data.action;
+    if (action === 'toggleMic') {
+      member.isMuted = data.isMuted === true;
+      emitVoiceRoomState(roomCode);
+      return;
+    }
+
+    if (action === 'sendMessage') {
+      const message = String(data.message || '').trim().slice(0, 300);
+      if (message) {
+        io.to(roomCode).emit('voiceRoomMessage', {
+          senderId: socket.id,
+          senderName: member.name,
+          message,
+          timestamp: Date.now()
+        });
+      }
+      return;
+    }
+
+    if (action === 'musicChanged') {
+      io.to(roomCode).emit('voiceRoomMusicChanged', {
+        senderId: socket.id,
+        track: String(data.track || '')
+      });
+      return;
+    }
+
+    if (['voiceOffer', 'voiceAnswer', 'voiceIceCandidate'].includes(action)) {
+      const targetId = String(data.targetId || '');
+      if (targetId) {
+        io.to(targetId).emit(action, {
+          senderId: socket.id,
+          payload: data.payload
+        });
+      }
+    }
+  });
+
+  socket.on('leaveVoiceRoom', (data = {}) => {
+    removeVoiceMember(socket, String(data.roomCode || '').trim());
+  });
 
   // 1. إنشاء غرفة
   socket.on('createRoom', (data) => {
@@ -296,6 +428,7 @@ io.on('connection', (socket) => {
   });
 
   socket.on('disconnect', () => {
+    removeVoiceMember(socket, socket.voiceRoomCode);
     for (const code in rooms) {
       const room = rooms[code];
       const playerIndex = room.players.findIndex(p => p.id === socket.id);
@@ -318,6 +451,27 @@ io.on('connection', (socket) => {
     }
   });
 });
+
+function removeVoiceMember(socket, roomCode) {
+  const room = voiceRooms[roomCode];
+  if (!room) return;
+
+  room.members = room.members.filter(member => member.id !== socket.id);
+  socket.leave(roomCode);
+  socket.voiceRoomCode = null;
+
+  if (room.members.length === 0) {
+    delete voiceRooms[roomCode];
+    return;
+  }
+
+  if (room.host === socket.id) {
+    room.host = room.members[0].id;
+    room.members[0].isHost = true;
+  }
+  io.to(roomCode).emit('voiceRoomMemberLeft', socket.id);
+  emitVoiceRoomState(roomCode);
+}
 
 // ✅ التعديل المهم جداً لبيئة Railway: إضافة '0.0.0.0'
 const PORT = process.env.PORT || 3000;
